@@ -18,23 +18,30 @@ def send_telegram(message):
     except Exception as e:
         print(f"Telegram error: {e}")
 
+send_telegram("✅ Test alert from MACD bot")
+
+
 def check_macd_alert(symbol):
     try:
-        df = yf.download(symbol, period="30d", interval="1h")
+        df = yf.download(symbol, period="30d", interval="1h", auto_adjust=True)
         df.dropna(inplace=True)
         df['EMA12'] = df['Close'].ewm(span=12).mean()
         df['EMA26'] = df['Close'].ewm(span=26).mean()
         df['MACD'] = df['EMA12'] - df['EMA26']
         df['Signal'] = df['MACD'].ewm(span=9).mean()
 
-        macd = df['MACD']
-        recent = macd[-6:]
+        macd = df['MACD'].dropna()
+        if len(macd) < 6:
+            print(f"Not enough data for {symbol}")
+            return
 
-        if (recent[-6] < 0 and
-            (recent[-6] - recent[-5]) < -0.018 and
-            (recent[-5] - recent[-4]) > 0.005 and
-            (recent[-4] - recent[-3]) < -0.01 and
-            (recent[-2] - recent[-1]) > 0.015):
+        recent = macd.iloc[-6:]
+
+        if (recent.iloc[0] < 0 and
+            (recent.iloc[0] - recent.iloc[1]) < -0.018 and
+            (recent.iloc[1] - recent.iloc[2]) > 0.005 and
+            (recent.iloc[2] - recent.iloc[3]) < -0.01 and
+            (recent.iloc[4] - recent.iloc[5]) > 0.015):
             send_telegram(f"📈 MACD pattern alert for {symbol}")
     except Exception as e:
         print(f"Error with {symbol}: {e}")
