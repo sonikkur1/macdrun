@@ -8,7 +8,7 @@ app = Flask(__name__)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-SYMBOLS = ["BTC-USD", "ETH-USD", "ALGO-USD", "XLM-USD", "DOT-USD", "SOL-USD"]
+SYMBOLS = ["BTC-USD", "LINK-USD", "SOL-USD", "XMR-USD"]
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -20,7 +20,7 @@ def send_telegram(message):
 
 def check_macd_alert(symbol):
     try:
-        df = yf.download(symbol, period="30d", interval="1h", auto_adjust=True)
+        df = yf.download(symbol, period="30d", interval="15m", auto_adjust=True)
         df.dropna(inplace=True)
         df['EMA12'] = df['Close'].ewm(span=12).mean()
         df['EMA26'] = df['Close'].ewm(span=26).mean()
