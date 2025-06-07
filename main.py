@@ -18,9 +18,6 @@ def send_telegram(message):
     except Exception as e:
         print(f"Telegram error: {e}")
 
-send_telegram("✅ Test alert from MACD bot")
-
-
 def check_macd_alert(symbol):
     try:
         df = yf.download(symbol, period="30d", interval="1h", auto_adjust=True)
