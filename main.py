@@ -1,3 +1,4 @@
+# main.py
 import os
 import time
 import threading
@@ -8,21 +9,22 @@ from flask import Flask
 
 app = Flask(__name__)
 
-# === CONFIG ===
+# === CONFIGURATION ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 SYMBOLS = ["BTC/USD", "LINK/USD", "SOL/USD", "XMR/USD"]
+TIMEFRAME = '15m'
+SLEEP_INTERVAL = 60 * 15  # 15 minutes
 
 kraken = ccxt.kraken({'enableRateLimit': True})
 
-# === TELEGRAM ===
+# === TELEGRAM NOTIFY ===
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message}
     try:
-        requests.post(url, data=payload)
+        requests.post(url, data={"chat_id": CHAT_ID, "text": message})
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(f"[Telegram Error] {e}")
 
 # === INDICATORS ===
 def compute_indicators(df):
@@ -34,18 +36,18 @@ def compute_indicators(df):
                 df['close'].diff().abs().rolling(14).mean() * 100
     return df
 
-# === FETCH DATA ===
+# === FETCH KRAKEN OHLCV ===
 def fetch_ohlcv(symbol):
     try:
-        ohlcv = kraken.fetch_ohlcv(symbol, timeframe='15m', limit=100)
+        ohlcv = kraken.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return compute_indicators(df)
     except Exception as e:
-        print(f"Error fetching {symbol}: {e}")
+        print(f"[Fetch Error] {symbol}: {e}")
         return None
 
-# === MACD PATTERN CHECK ===
+# === PATTERN DETECTION ===
 symbol_states = {}
 
 def check_macd_pattern(symbol):
@@ -53,25 +55,17 @@ def check_macd_pattern(symbol):
     if df is None or len(df) < 20:
         return
 
-    macd = df['MACD'].tolist()
-    signal = df['Signal'].tolist()
-    rsi = df['RSI'].tolist()
-    length = len(macd)
+    macd, signal, rsi = df['MACD'].tolist(), df['Signal'].tolist(), df['RSI'].tolist()
+    i = len(macd) - 1
 
-    # Init symbol state if not set
-    if symbol not in symbol_states:
-        symbol_states[symbol] = {'state': 0, 'peak': None, 'valley': None, 'tempRise': None, 'secondValley': None, 'in_trade': False}
-
-    s = symbol_states[symbol]
-    state, peak, valley, tempRise, secondValley, in_trade = s.values()
-
-    # Latest index
-    i = length - 1
-    if macd[i] >= 0 or any(pd.isna([macd[i], signal[i], rsi[i]])):
-        symbol_states[symbol]['state'] = 0
+    if any(pd.isna([macd[i], signal[i], rsi[i]])) or macd[i] >= 0:
+        symbol_states[symbol] = {'state': 0, 'in_trade': False}
         return
 
-    # ENTRY LOGIC
+    state_obj = symbol_states.get(symbol, {'state': 0, 'peak': None, 'valley': None, 'tempRise': None, 'secondValley': None, 'in_trade': False})
+    state, peak, valley, tempRise, secondValley, in_trade = state_obj.values()
+
+    # === ENTRY LOGIC ===
     if state == 0:
         peak = macd[i]
         state = 1
@@ -84,28 +78,24 @@ def check_macd_pattern(symbol):
     elif state == 3 and macd[i] < tempRise - 0.007:
         secondValley = macd[i]
         state = 4
-    elif (
-        state == 4 and
-        macd[i] > secondValley + 0.010 and
-        macd[i] > signal[i] and
-        rsi[i] < 65
-    ):
-        send_telegram(f"📈 BUY SIGNAL: MACD pattern detected on {symbol} (15m)")
+    elif state == 4 and macd[i] > secondValley + 0.010 and macd[i] > signal[i] and rsi[i] < 65:
+        send_telegram(f"📈 BUY SIGNAL: {symbol} | MACD reversal detected ({TIMEFRAME})")
         in_trade = True
         state = 5
 
-    # EXIT LOGIC
-    if in_trade:
-        if (
-            macd[i] < signal[i] or
-            macd[i] < macd[i - 1] and
-            rsi[i] > 55
-        ):
-            send_telegram(f"📉 EXIT SIGNAL: MACD exit triggered on {symbol} (15m)")
-            in_trade = False
-            state = 0
+    # === EXIT LOGIC ===
+    if in_trade and (
+        macd[i] < signal[i] or
+        (macd[i] < macd[i - 1] and rsi[i] > 55)
+    ):
+        send_telegram(f"📉 EXIT SIGNAL: {symbol} | MACD cross or RSI reversal ({TIMEFRAME})")
+        in_trade = False
+        state = 0
 
-    # Save back
+    # === Debug Output ===
+    print(f"[{symbol}] MACD: {macd[i]:.4f} | Signal: {signal[i]:.4f} | RSI: {rsi[i]:.2f} | State: {state}")
+
+    # === SAVE STATE ===
     symbol_states[symbol] = {
         'state': state,
         'peak': peak,
@@ -120,12 +110,12 @@ def run_bot():
     while True:
         for symbol in SYMBOLS:
             check_macd_pattern(symbol)
-        time.sleep(60 * 15)  # every 15 minutes
+        time.sleep(SLEEP_INTERVAL)
 
-# === FLASK ROUTE ===
+# === KEEP-ALIVE ROUTE ===
 @app.route("/")
 def home():
-    return "MACD Alert Bot with Entry/Exit (15m) is running."
+    return "✅ MACD Bot (15m) Running on Render"
 
 # === START THREAD ===
 threading.Thread(target=run_bot, daemon=True).start()
