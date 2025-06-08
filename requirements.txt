@@ -1,5 +1,3 @@
-flask
 ccxt
 pandas
 requests
-gunicorn
