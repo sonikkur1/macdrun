@@ -121,6 +121,7 @@ def check_pattern(symbol):
 def main():
     for symbol in SYMBOLS:
         check_pattern(symbol)
+        send_telegram("📈 Test Alert: Bot is working.")
 
 if __name__ == "__main__":
     main()
