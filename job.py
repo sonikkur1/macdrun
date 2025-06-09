@@ -1,140 +1,117 @@
+import ccxt
 import pandas as pd
-import requests
+import numpy as np
 import time
+import requests
 from ta.trend import MACD
 from ta.momentum import RSIIndicator
-from ta.volatility import AverageTrueRange
 
+# === CONFIGURATION ===
+symbols = ['BTC/USDT', 'LINK/USDT', 'SOL/USDT', 'XMR/USDT']
+exchange = ccxt.binance()
+interval = '15m'
+limit = 100
+refresh_seconds = 60
+
+# === MACD Pattern Parameters ===
+dropThreshold = 0.015
+riseTowardZeroThreshold = 0.004
+secondDropThreshold = 0.009
+finalRiseThreshold = 0.011
+
+# === TELEGRAM CONFIG ===
 TELEGRAM_TOKEN = 'YOUR_TELEGRAM_BOT_TOKEN'
-TELEGRAM_CHAT_ID = 'YOUR_CHAT_ID'
+CHAT_ID = 'YOUR_CHAT_ID'
 
-SYMBOLS = ["BTCUSDT", "LINKUSDT", "SOLUSDT", "XMRUSDT"]
-INTERVAL = '15m'
-LIMIT = 100
-
-def send_telegram_message(message):
+def send_telegram_alert(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message}
-    requests.post(url, data=payload)
+    payload = {"chat_id": CHAT_ID, "text": message}
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"⚠️ Failed to send Telegram alert: {e}")
 
-def fetch_ohlcv(symbol, interval='15m', limit=100):
-    url = f'https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}'
-    response = requests.get(url)
-    data = response.json()
-    df = pd.DataFrame(data, columns=[
-        'timestamp', 'open', 'high', 'low', 'close', 'volume',
-        'close_time', 'quote_asset_volume', 'trades',
-        'taker_base_vol', 'taker_quote_vol', 'ignore'
-    ])
+
+# === Track states and alerts ===
+symbol_states = {s: {'long_state': 0, 'in_trade': False} for s in symbols}
+
+
+def fetch_ohlcv(symbol, interval, limit=100):
+    data = exchange.fetch_ohlcv(symbol, timeframe=interval, limit=limit)
+    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
+
+
+def process_symbol(symbol):
+    df = fetch_ohlcv(symbol, interval, limit)
     df.set_index('timestamp', inplace=True)
-    df = df.astype(float)
-    return df
 
-def calculate_indicators(df):
-    df['macd'] = MACD(df['close']).macd()
-    df['macd_signal'] = MACD(df['close']).macd_signal()
-    df['rsi'] = RSIIndicator(df['close'], window=14).rsi()
-    df['rsi_short'] = RSIIndicator(df['close'], window=5).rsi()
-    df['atr'] = AverageTrueRange(df['high'], df['low'], df['close'], window=10).average_true_range()
+    macd = MACD(close=df["close"], window_slow=26, window_fast=12, window_sign=9)
+    df["macd"] = macd.macd()
+    df["macd_signal"] = macd.macd_signal()
+    df["rsi"] = RSIIndicator(close=df["close"]).rsi()
 
-    # Simple VWAP approximation using cumulative volume and price
-    df['cum_vol'] = df['volume'].cumsum()
-    df['cum_vol_price'] = (df['close'] * df['volume']).cumsum()
-    df['vwap'] = df['cum_vol_price'] / df['cum_vol']
+    if len(df) < 2:
+        return
 
-    df['volume_ma'] = df['volume'].rolling(window=20).mean()
-    df['high_volume'] = df['volume'] > 1.5 * df['volume_ma']
-    df['rsi_falling'] = df['rsi_short'].diff() < 0
-    return df
+    latest = df.iloc[-1]
+    prev = df.iloc[-2]
 
-def generate_signals(df):
-    signals = {'entry_long': False, 'exit_long': False, 'entry_short': False, 'exit_short': False}
+    state = symbol_states[symbol]
+    long_state = state['long_state']
+    in_trade = state['in_trade']
 
-    # Ensure we have enough data
-    if len(df) < 6:
-        return signals
+    macd_val = latest["macd"]
+    macd_sig = latest["macd_signal"]
+    rsi_val = latest["rsi"]
+    prev_macd = prev["macd"]
+    prev_sig = prev["macd_signal"]
 
-    macd = df['macd'].values
-    macd_signal = df['macd_signal'].values
-    rsi = df['rsi'].values
-    rsi_falling = df['rsi_falling'].values
-    high_volume = df['high_volume'].values
-    close = df['close'].values
-    vwap = df['vwap'].values
-    atr = df['atr'].values
-    supertrend = close - atr * 3
-    trend_dir = close > supertrend
-    is_bullish = trend_dir[-1]
-    is_bearish = not trend_dir[-1]
+    # === MACD Pattern State Machine ===
+    if macd_val < 0:
+        if long_state == 0:
+            peak = macd_val
+            long_state = 1
+        elif long_state == 1 and macd_val < peak - dropThreshold:
+            valley = macd_val
+            long_state = 2
+        elif long_state == 2 and macd_val > valley + riseTowardZeroThreshold:
+            temp_rise = macd_val
+            long_state = 3
+        elif long_state == 3 and macd_val < temp_rise - secondDropThreshold:
+            second_valley = macd_val
+            long_state = 4
+        elif long_state == 4 and macd_val > second_valley + finalRiseThreshold and rsi_val < 55 and macd_val > macd_sig:
+            long_state = 5
+    else:
+        long_state = 0
 
-    # === Bullish Pattern ===
-    bull_state = 0
-    for i in range(-6, 0):
-        if macd[i] < 0:
-            if bull_state == 0:
-                peak = macd[i]
-                bull_state = 1
-            elif bull_state == 1 and macd[i] < peak - 0.012:
-                valley = macd[i]
-                bull_state = 2
-            elif bull_state == 2 and macd[i] > valley + 0.004:
-                temp_rise = macd[i]
-                bull_state = 3
-            elif bull_state == 3 and macd[i] < temp_rise - 0.007:
-                second_valley = macd[i]
-                bull_state = 4
-            elif bull_state == 4 and macd[i] > second_valley + 0.010 and macd[i] > macd_signal[i] and rsi[i] < 65:
-                bull_state = 5
-    if bull_state == 5 and is_bullish and close[-1] > vwap[-1]:
-        signals['entry_long'] = True
+    entry_signal = (long_state == 5 or (macd_val > macd_sig and macd_val < 0 and prev_macd < prev_sig)) and not in_trade
+    if entry_signal:
+        msg = f"📈 [LONG ENTRY] {symbol} at {latest.name.strftime('%Y-%m-%d %H:%M')} | Price: {latest['close']:.2f}"
+        print(msg)
+        send_telegram_alert(msg)
+        in_trade = True
 
-    if signals['entry_long'] and (macd[-1] < macd_signal[-1] or macd[-1] < macd[-2]) and rsi[-1] > 55:
-        signals['exit_long'] = True
+    exit_signal = in_trade and macd_val < macd_sig and macd_val > 0
+    if exit_signal:
+        msg = f"📉 [LONG EXIT] {symbol} at {latest.name.strftime('%Y-%m-%d %H:%M')} | Price: {latest['close']:.2f}"
+        print(msg)
+        send_telegram_alert(msg)
+        in_trade = False
 
-    # === Bearish Pattern ===
-    bear_state = 0
-    for i in range(-6, 0):
-        if macd[i] > 0:
-            if bear_state == 0:
-                valley = macd[i]
-                bear_state = 1
-            elif bear_state == 1 and macd[i] > valley + 0.012:
-                peak = macd[i]
-                bear_state = 2
-            elif bear_state == 2 and macd[i] < peak - 0.004:
-                drop = macd[i]
-                bear_state = 3
-            elif bear_state == 3 and macd[i] > drop + 0.007:
-                second_peak = macd[i]
-                bear_state = 4
-            elif bear_state == 4 and macd[i] < second_peak - 0.010 and macd[i] < macd_signal[i] and rsi[i] > 35:
-                bear_state = 5
-    if bear_state == 5 and is_bearish and close[-1] < vwap[-1] and rsi[-1] > 35 and rsi_falling[-1] and high_volume[-1]:
-        signals['entry_short'] = True
+    symbol_states[symbol]['long_state'] = long_state
+    symbol_states[symbol]['in_trade'] = in_trade
 
-    if signals['entry_short'] and (macd[-1] > macd_signal[-1] or macd[-1] > macd[-2]) and rsi[-1] < 45:
-        signals['exit_short'] = True
-
-    return signals
-
-def main():
-    for symbol in SYMBOLS:
-        try:
-            df = fetch_ohlcv(symbol, INTERVAL, LIMIT)
-            df = calculate_indicators(df)
-            signals = generate_signals(df)
-
-            if signals['entry_long']:
-                send_telegram_message(f"📈 LONG Signal for {symbol} (15m)")
-            if signals['exit_long']:
-                send_telegram_message(f"📉 EXIT LONG Signal for {symbol} (15m)")
-            if signals['entry_short']:
-                send_telegram_message(f"📉 SHORT Signal for {symbol} (15m)")
-            if signals['exit_short']:
-                send_telegram_message(f"📈 EXIT SHORT Signal for {symbol} (15m)")
-        except Exception as e:
-            print(f"Error with {symbol}: {e}")
 
 if __name__ == "__main__":
-    main()
+    print("🚀 Monitoring Binance crypto pairs with MACD pattern alerts to Telegram...\n")
+    while True:
+        for symbol in symbols:
+            try:
+                process_symbol(symbol)
+            except Exception as e:
+                print(f"Error processing {symbol}: {e}")
+        print("⏳ Waiting for next check...\n")
+        time.sleep(refresh_seconds)
