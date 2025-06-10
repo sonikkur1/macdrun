@@ -3,9 +3,9 @@ import pandas as pd
 import numpy as np
 import time
 import requests
-import os
 from ta.trend import MACD
 from ta.momentum import RSIIndicator
+import os
 
 # === CONFIGURATION ===
 symbols = ['BTC/USDT', 'LINK/USDT', 'SOL/USDT', 'XMR/USDT']
@@ -32,7 +32,7 @@ def send_telegram_alert(message):
     except Exception as e:
         print(f"⚠️ Failed to send Telegram alert: {e}")
 
-# === State Tracking for Each Symbol ===
+# === Track state per symbol ===
 symbol_states = {
     s: {
         'long_state': 0,
@@ -41,8 +41,7 @@ symbol_states = {
         'valley': None,
         'temp_rise': None,
         'second_valley': None
-    }
-    for s in symbols
+    } for s in symbols
 }
 
 def fetch_ohlcv(symbol, interval, limit=100):
@@ -69,10 +68,6 @@ def process_symbol(symbol):
     state = symbol_states[symbol]
     long_state = state['long_state']
     in_trade = state['in_trade']
-    peak = state['peak']
-    valley = state['valley']
-    temp_rise = state['temp_rise']
-    second_valley = state['second_valley']
 
     macd_val = latest["macd"]
     macd_sig = latest["macd_signal"]
@@ -81,27 +76,28 @@ def process_symbol(symbol):
     prev_sig = prev["macd_signal"]
 
     # === MACD Pattern State Machine ===
-    if pd.notna(macd_val) and pd.notna(macd_sig):
-        if macd_val < 0:
-            if long_state == 0:
-                peak = macd_val
-                long_state = 1
-            elif long_state == 1 and peak is not None and macd_val < peak - dropThreshold:
-                valley = macd_val
-                long_state = 2
-            elif long_state == 2 and valley is not None and macd_val > valley + riseTowardZeroThreshold:
-                temp_rise = macd_val
-                long_state = 3
-            elif long_state == 3 and temp_rise is not None and macd_val < temp_rise - secondDropThreshold:
-                second_valley = macd_val
-                long_state = 4
-            elif long_state == 4 and second_valley is not None and macd_val > second_valley + finalRiseThreshold and rsi_val < 55 and macd_val > macd_sig:
-                long_state = 5
-        else:
-            long_state = 0
-            peak = valley = temp_rise = second_valley = None
+    if macd_val < 0:
+        if long_state == 0:
+            state['peak'] = macd_val
+            long_state = 1
+        elif long_state == 1 and macd_val < state['peak'] - dropThreshold:
+            state['valley'] = macd_val
+            long_state = 2
+        elif long_state == 2 and macd_val > state['valley'] + riseTowardZeroThreshold:
+            state['temp_rise'] = macd_val
+            long_state = 3
+        elif long_state == 3 and macd_val < state['temp_rise'] - secondDropThreshold:
+            state['second_valley'] = macd_val
+            long_state = 4
+        elif long_state == 4 and macd_val > state['second_valley'] + finalRiseThreshold and rsi_val < 55 and macd_val > macd_sig:
+            long_state = 5
+    else:
+        long_state = 0
+        state['peak'] = None
+        state['valley'] = None
+        state['temp_rise'] = None
+        state['second_valley'] = None
 
-    # === Entry Signal ===
     entry_signal = (long_state == 5 or (macd_val > macd_sig and macd_val < 0 and prev_macd < prev_sig)) and not in_trade
     if entry_signal:
         msg = f"📈 [LONG ENTRY] {symbol} at {latest.name.strftime('%Y-%m-%d %H:%M')} | Price: {latest['close']:.2f}"
@@ -109,7 +105,6 @@ def process_symbol(symbol):
         send_telegram_alert(msg)
         in_trade = True
 
-    # === Exit Signal ===
     exit_signal = in_trade and macd_val < macd_sig and macd_val > 0
     if exit_signal:
         msg = f"📉 [LONG EXIT] {symbol} at {latest.name.strftime('%Y-%m-%d %H:%M')} | Price: {latest['close']:.2f}"
@@ -117,15 +112,8 @@ def process_symbol(symbol):
         send_telegram_alert(msg)
         in_trade = False
 
-    # === Save Updated State ===
-    symbol_states[symbol] = {
-        'long_state': long_state,
-        'in_trade': in_trade,
-        'peak': peak,
-        'valley': valley,
-        'temp_rise': temp_rise,
-        'second_valley': second_valley
-    }
+    state['long_state'] = long_state
+    state['in_trade'] = in_trade
 
 if __name__ == "__main__":
     print("🚀 Monitoring Binance crypto pairs with MACD pattern alerts to Telegram...\n")
