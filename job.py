@@ -22,15 +22,22 @@ finalRiseThreshold = 0.011
 
 # === TELEGRAM CONFIG ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
+CHAT_IDs = os.getenv("CHAT_IDs")
 
 def send_telegram_alert(message):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message}
-    try:
-        requests.post(url, json=payload)
-    except Exception as e:
-        print(f"⚠️ Failed to send Telegram alert: {e}")
+    chat_ids = os.getenv("CHAT_IDs", "").split(",")
+    for chat_id in chat_ids:
+        chat_id = chat_id.strip()
+        if not chat_id:
+            continue
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": chat_id, "text": message}
+        try:
+            response = requests.post(url, json=payload)
+            if response.status_code != 200:
+                print(f"⚠️ Telegram error {response.status_code}: {response.text}")
+        except Exception as e:
+            print(f"⚠️ Failed to send alert to chat {chat_id}: {e}")
 
 # === Track state per symbol ===
 symbol_states = {
