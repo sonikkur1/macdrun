@@ -1,5 +1,6 @@
 import ccxt
 import pandas as pd
+import numpy as np
 import time
 import requests
 from ta.trend import MACD
@@ -8,15 +9,10 @@ import os
 
 # === CONFIGURATION ===
 symbols = ['BTC/USDT', 'LINK/USDT', 'SOL/USDT', 'XMR/USDT']
-exchange = ccxt.binance({
-    'enableRateLimit': True,
-    'options': {
-        'adjustForTimeDifference': True
-    }
-})
+exchange = ccxt.binance()
 interval = '15m'
-limit = 30  # reduced for lower rate usage
-refresh_seconds = 120  # run less frequently to avoid IP bans
+limit = 100
+refresh_seconds = 60
 
 # === MACD Pattern Parameters ===
 dropThreshold = 0.015
@@ -26,34 +22,17 @@ finalRiseThreshold = 0.011
 
 # === TELEGRAM CONFIG ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_IDs = os.getenv("CHAT_IDs", "")  # comma-separated list
-chat_ids = [chat_id.strip() for chat_id in CHAT_IDs.split(',') if chat_id.strip()]
-
-# Better environment parsing
-chat_ids_raw = os.getenv("CHAT_IDs", "")
-try:
-    chat_ids = [cid.strip() for cid in chat_ids_raw.split(",") if cid.strip()]
-    if not chat_ids:
-        raise ValueError("No chat IDs found.")
-except Exception as e:
-    print(f"⚠️ Failed to parse CHAT_IDs: {e}")
-    chat_ids = []
+CHAT_ID = os.getenv("CHAT_ID")
 
 def send_telegram_alert(message):
-    for chat_id in chat_ids:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": chat_id, "text": message}
-        try:
-            response = requests.post(url, json=payload, timeout=5)  # add timeout
-            if response.status_code != 200:
-                print(f"⚠️ Telegram error for chat_id {chat_id}: {response.text}")
-        except requests.exceptions.Timeout:
-            print(f"⏱ Timeout sending alert to {chat_id}")
-        except Exception as e:
-            print(f"⚠️ Failed to send Telegram alert to {chat_id}: {e}")
-        time.sleep(1.1)  # Delay to prevent rate limiting
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": CHAT_ID, "text": message}
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"⚠️ Failed to send Telegram alert: {e}")
 
-# === State tracking per symbol ===
+# === Track state per symbol ===
 symbol_states = {
     s: {
         'long_state': 0,
@@ -65,26 +44,23 @@ symbol_states = {
     } for s in symbols
 }
 
-def fetch_ohlcv(symbol, interval, limit):
-    try:
-        data = exchange.fetch_ohlcv(symbol, timeframe=interval, limit=limit)
-        df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        return df
-    except Exception as e:
-        print(f"⚠️ Failed to fetch data for {symbol}: {e}")
-        return None
+def fetch_ohlcv(symbol, interval, limit=100):
+    data = exchange.fetch_ohlcv(symbol, timeframe=interval, limit=limit)
+    df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    return df
 
 def process_symbol(symbol):
     df = fetch_ohlcv(symbol, interval, limit)
-    if df is None or len(df) < 2:
-        return
-
     df.set_index('timestamp', inplace=True)
+
     macd = MACD(close=df["close"], window_slow=26, window_fast=12, window_sign=9)
     df["macd"] = macd.macd()
     df["macd_signal"] = macd.macd_signal()
     df["rsi"] = RSIIndicator(close=df["close"]).rsi()
+
+    if len(df) < 2:
+        return
 
     latest = df.iloc[-1]
     prev = df.iloc[-2]
@@ -104,18 +80,16 @@ def process_symbol(symbol):
         if long_state == 0:
             state['peak'] = macd_val
             long_state = 1
-        elif long_state == 1 and state['peak'] is not None and macd_val < state['peak'] - dropThreshold:
+        elif long_state == 1 and macd_val < state['peak'] - dropThreshold:
             state['valley'] = macd_val
             long_state = 2
-        elif long_state == 2 and state['valley'] is not None and macd_val > state['valley'] + riseTowardZeroThreshold:
+        elif long_state == 2 and macd_val > state['valley'] + riseTowardZeroThreshold:
             state['temp_rise'] = macd_val
             long_state = 3
-        elif long_state == 3 and state['temp_rise'] is not None and macd_val < state['temp_rise'] - secondDropThreshold:
+        elif long_state == 3 and macd_val < state['temp_rise'] - secondDropThreshold:
             state['second_valley'] = macd_val
             long_state = 4
-        elif long_state == 4 and state['second_valley'] is not None and \
-                macd_val > state['second_valley'] + finalRiseThreshold and \
-                rsi_val < 55 and macd_val > macd_sig:
+        elif long_state == 4 and macd_val > state['second_valley'] + finalRiseThreshold and rsi_val < 55 and macd_val > macd_sig:
             long_state = 5
     else:
         long_state = 0
@@ -141,14 +115,13 @@ def process_symbol(symbol):
     state['long_state'] = long_state
     state['in_trade'] = in_trade
 
-# === Main Execution Loop ===
 if __name__ == "__main__":
-    print("🚀 Starting crypto alert bot...\n")
+    print("🚀 Monitoring Binance crypto pairs with MACD pattern alerts to Telegram...\n")
     while True:
         for symbol in symbols:
             try:
                 process_symbol(symbol)
             except Exception as e:
-                print(f"❌ Error processing {symbol}: {e}")
+                print(f"Error processing {symbol}: {e}")
         print("⏳ Waiting for next check...\n")
         time.sleep(refresh_seconds)
