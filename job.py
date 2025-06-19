@@ -29,16 +29,29 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_IDs = os.getenv("CHAT_IDs", "")  # comma-separated list
 chat_ids = [chat_id.strip() for chat_id in CHAT_IDs.split(',') if chat_id.strip()]
 
+# Better environment parsing
+chat_ids_raw = os.getenv("CHAT_IDs", "")
+try:
+    chat_ids = [cid.strip() for cid in chat_ids_raw.split(",") if cid.strip()]
+    if not chat_ids:
+        raise ValueError("No chat IDs found.")
+except Exception as e:
+    print(f"⚠️ Failed to parse CHAT_IDs: {e}")
+    chat_ids = []
+
 def send_telegram_alert(message):
     for chat_id in chat_ids:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {"chat_id": chat_id, "text": message}
         try:
-            response = requests.post(url, json=payload)
+            response = requests.post(url, json=payload, timeout=5)  # add timeout
             if response.status_code != 200:
                 print(f"⚠️ Telegram error for chat_id {chat_id}: {response.text}")
+        except requests.exceptions.Timeout:
+            print(f"⏱ Timeout sending alert to {chat_id}")
         except Exception as e:
             print(f"⚠️ Failed to send Telegram alert to {chat_id}: {e}")
+        time.sleep(1.1)  # Delay to prevent rate limiting
 
 # === State tracking per symbol ===
 symbol_states = {
